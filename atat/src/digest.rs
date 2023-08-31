@@ -1,5 +1,7 @@
 use core::marker::PhantomData;
 
+use nom::Parser as _;
+
 use crate::InternalError;
 
 #[derive(Debug, PartialEq, Eq)]
@@ -116,7 +118,7 @@ impl<P: Parser> Digester for AtDigester<P> {
         // 1. Optionally discard space and echo
         let buf = parser::trim_start_ascii_space(input);
         let space_bytes = input.len() - buf.len();
-        let (buf, space_and_echo_bytes) = match nom::combinator::opt(parser::echo)(buf) {
+        let (buf, space_and_echo_bytes) = match nom::combinator::opt(parser::echo).parse(buf) {
             Ok((buf, echo)) => (buf, space_bytes + echo.unwrap_or_default().len()),
             Err(nom::Err::Incomplete(_)) => return (DigestResult::None, 0),
             Err(_) => panic!("NOM ERROR - opt(echo)"),
@@ -202,8 +204,7 @@ pub mod parser {
         character::complete,
         combinator::{eof, map, map_res, not, recognize},
         error::ParseError,
-        sequence::tuple,
-        IResult,
+        IResult, Parser,
     };
 
     /// Matches the equivalent of regex: "\r\n{token}(.*)\r\n"
@@ -212,13 +213,14 @@ pub mod parser {
     ) -> impl Fn(&'a [u8]) -> IResult<&'a [u8], (&'a [u8], usize), Error>
     where
         &'a [u8]: nom::Compare<T> + nom::FindSubstring<T>,
-        T: nom::InputLength + Clone + nom::InputTake + nom::InputIter,
+        T: nom::InputLength + Clone + nom::Input + nom::Input,
     {
         move |i| {
-            let (i, (le, urc_tag)) = tuple((
+            let (i, (le, urc_tag)) = (
                 complete::line_ending,
-                recognize(tuple((tag(token.clone()), take_until_including("\r\n")))),
-            ))(i)?;
+                recognize((tag(token.clone()), take_until_including("\r\n"))),
+            )
+                .parse(i)?;
 
             Ok((
                 i,
@@ -288,16 +290,18 @@ pub mod parser {
                     tag.len(),
                 )
             }),
-        ))(buf)
+        ))
+        .parse(buf)
     }
 
     pub fn prompt_response(buf: &[u8]) -> IResult<&[u8], (DigestResult, usize)> {
         for prompt in &[b'>', b'@'] {
-            if let Ok((buf, ((prefix, p), ws, _))) = tuple((
+            if let Ok((buf, ((prefix, p), ws, _))) = (
                 take_until_including::<_, _, nom::error::Error<_>>(&[*prompt][..]),
                 complete::multispace0,
                 eof,
-            ))(buf)
+            )
+                .parse(buf)
             {
                 return Ok((
                     buf,
@@ -316,15 +320,16 @@ pub mod parser {
 
     pub fn success_response(buf: &[u8]) -> IResult<&[u8], (DigestResult, usize)> {
         let (i, ((data, tag), ws)) = alt((
-            tuple((
+            (
                 take_until_including("\r\nOK\r\n"),
                 nom::combinator::success(&b""[..]),
-            )),
-            tuple((
+            ),
+            (
                 take_until_including("\r\nCONNECT"),
                 recognize(take_until_including("\r\n")),
-            )),
-        ))(buf)?;
+            ),
+        ))
+        .parse(buf)?;
 
         Ok((
             i,
@@ -341,15 +346,15 @@ pub mod parser {
             return Ok((buf, &[]));
         }
 
-        recognize(nom::bytes::complete::take_until("\r\n"))(buf)
+        recognize(nom::bytes::complete::take_until("\r\n")).parse(buf)
     }
 
     fn take_until_including<T, Input, Error: ParseError<Input>>(
         tag: T,
     ) -> impl Fn(Input) -> IResult<Input, (Input, Input), Error>
     where
-        Input: nom::Compare<T> + nom::FindSubstring<T> + nom::InputLength + nom::InputTake,
-        T: nom::InputLength + Clone + nom::InputTake,
+        Input: nom::Compare<T> + nom::FindSubstring<T> + nom::InputLength + nom::Input,
+        T: nom::InputLength + Clone + nom::Input,
     {
         move |i| {
             let (i, d) = nom::bytes::complete::take_until(tag.clone())(i)?;
@@ -364,22 +369,20 @@ pub mod parser {
     ) -> impl Fn(&'a [u8]) -> IResult<&'a [u8], (u16, usize), Error>
     where
         &'a [u8]: nom::Compare<T> + nom::FindSubstring<T>,
-        T: nom::InputLength + Clone + nom::InputTake + nom::InputIter,
+        T: nom::InputLength + Clone + nom::Input,
         nom::Err<Error>: From<nom::Err<nom::error::Error<&'a [u8]>>>,
     {
         move |i| {
-            let (i, (prefix_data, (error_code, error_code_len), le)) = tuple((
-                recognize(tuple((
-                    take_until_including(token.clone()),
-                    complete::multispace0,
-                ))),
+            let (i, (prefix_data, (error_code, error_code_len), le)) = (
+                recognize((take_until_including(token.clone()), complete::multispace0)),
                 map_res(complete::digit1, |digits| {
                     u16::from_str(core::str::from_utf8(digits).map_err(drop)?)
                         .map_err(drop)
                         .map(|i| (i, digits.len()))
                 }),
                 complete::line_ending,
-            ))(i)?;
+            )
+                .parse(i)?;
 
             Ok((
                 i,
@@ -394,14 +397,15 @@ pub mod parser {
     ) -> impl Fn(&'a [u8]) -> IResult<&'a [u8], (&'a [u8], usize), Error>
     where
         &'a [u8]: nom::Compare<T> + nom::FindSubstring<T>,
-        T: nom::InputLength + Clone + nom::InputTake + nom::InputIter,
+        T: nom::InputLength + Clone + nom::Input + nom::Input,
     {
         move |i| {
-            let (i, (prefix_data, _, error_msg)) = tuple((
+            let (i, (prefix_data, _, error_msg)) = (
                 recognize(take_until_including(token.clone())),
                 not(tag("\r")),
                 recognize(take_until_including("\r\n")),
-            ))(i)?;
+            )
+                .parse(i)?;
 
             Ok((
                 i,
@@ -420,7 +424,8 @@ pub mod parser {
             let (i, (data, tag)) = alt((
                 take_until_including("\r\nERROR\r\n"),
                 take_until_including("\r\nCOMMAND NOT SUPPORT\r\n"),
-            ))(i)?;
+            ))
+            .parse(i)?;
 
             Ok((i, data.len() + tag.len()))
         }
@@ -453,7 +458,8 @@ pub mod parser {
                         (ConnectionError::NoDialtone, data.len() + tag.len())
                     },
                 ),
-            ))(i)
+            ))
+            .parse(i)
         }
     }
 
@@ -475,7 +481,7 @@ pub mod parser {
 }
 #[cfg(test)]
 mod test {
-    use nom::{branch, bytes, character, combinator, sequence};
+    use nom::{branch, bytes, character, combinator, Parser as _};
 
     use super::parser::{echo, urc_helper};
     use super::*;
@@ -490,7 +496,8 @@ mod test {
 
     impl Parser for UrcTestParser {
         fn parse(buf: &[u8]) -> Result<(&[u8], usize), ParseError> {
-            let (_, r) = nom::branch::alt((urc_helper("+UUSORD"), urc_helper("+CIEV")))(buf)?;
+            let (_, r) =
+                nom::branch::alt((urc_helper("+UUSORD"), urc_helper("+CIEV"))).parse(buf)?;
 
             Ok(r)
         }
@@ -535,7 +542,7 @@ mod test {
         for (response, expected) in tests {
             println!("Testing: {:?}", LossyStr(response));
 
-            match nom::combinator::opt(parser::echo)(response) {
+            match nom::combinator::opt(parser::echo).parse(response) {
                 Ok((buf, _)) => {
                     assert_eq!(buf, expected);
                 }
@@ -1210,23 +1217,24 @@ mod test {
     #[test]
     fn custom_success_with_prompt() {
         let mut digester = AtDigester::<UrcTestParser>::new().with_custom_success(|buf| {
-            let (_reminder, (head, data, tail)) = branch::alt((sequence::tuple((
+            let (_reminder, (head, data, tail)) = branch::alt(((
                 bytes::streaming::tag(b"\r\n"),
-                combinator::recognize(sequence::tuple((
+                combinator::recognize((
                     bytes::streaming::tag(b"+CIPRXGET: 2,"),
                     character::streaming::u8,
                     bytes::streaming::tag(","),
                     combinator::flat_map(character::streaming::u16, |data_len| {
-                        combinator::recognize(sequence::tuple((
+                        combinator::recognize((
                             bytes::streaming::tag(","),
                             character::streaming::u16,
                             bytes::streaming::tag("\r\n"),
                             bytes::streaming::take(data_len),
-                        )))
+                        ))
                     }),
-                ))),
+                )),
                 bytes::streaming::tag(b"\r\nOK\r\n"),
-            )),))(buf)?;
+            ),))
+            .parse(buf)?;
 
             Ok((data, head.len() + data.len() + tail.len()))
         });

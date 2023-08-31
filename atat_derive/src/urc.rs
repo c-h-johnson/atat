@@ -74,16 +74,18 @@ pub fn atat_urc(input: TokenStream) -> TokenStream {
             }
         }
 
+        use atat::nom::Parser as _;
+
         #[automatically_derived]
         impl #impl_generics atat::Parser for #ident #ty_generics #where_clause {
             fn parse<'a>(
                 buf: &'a [u8],
             ) -> Result<(&'a [u8], usize), atat::digest::ParseError> {
-                let (_, r) = atat::nom::branch::alt((
+                let (_, r) = atat::nom::branch::alt([
                     #(
                         #digest_arms
                     )*
-                ))(buf)?;
+                ]).parse(buf)?;
 
                 Ok(r)
             }
